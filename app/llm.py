@@ -12,6 +12,7 @@ Google Gemini OpenAI-compat, OpenRouter, OpenAI, ...), selected purely by env.
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from typing import Optional
 
 import httpx
@@ -105,11 +106,7 @@ def _validate(data: dict, req: TicketRequest) -> Optional[dict]:
     return data
 
 
-def analyze(req: TicketRequest, baseline: Investigation) -> Optional[dict]:
-    """Run full LLM analysis. Return a validated field dict, or None to fall back."""
-    if not settings.llm_active():
-        return None
-
+def _call(req: TicketRequest, baseline: Investigation) -> dict:
     payload = {
         "model": settings.LLM_MODEL,
         "temperature": 0.2,
@@ -124,14 +121,31 @@ def analyze(req: TicketRequest, baseline: Investigation) -> Optional[dict]:
         "Content-Type": "application/json",
     }
     url = settings.LLM_BASE_URL.rstrip("/") + "/chat/completions"
+    with httpx.Client(timeout=settings.LLM_TIMEOUT) as client:
+        resp = client.post(url, json=payload, headers=headers)
+        resp.raise_for_status()
+        content = resp.json()["choices"][0]["message"]["content"]
+        return json.loads(content)
 
+
+def analyze(req: TicketRequest, baseline: Investigation) -> Optional[dict]:
+    """Run full LLM analysis. Return a validated field dict, or None to fall back.
+
+    A hard wall-clock deadline guarantees we abandon a slow/misbehaving provider
+    well under the 30s per-request limit (some endpoints retry server-side and
+    ignore the HTTP client timeout). The abandoned worker thread is left to die on
+    its own; we return immediately and fall back to the deterministic result.
+    """
+    if not settings.llm_active():
+        return None
+
+    executor = ThreadPoolExecutor(max_workers=1)
     try:
-        with httpx.Client(timeout=settings.LLM_TIMEOUT) as client:
-            resp = client.post(url, json=payload, headers=headers)
-            resp.raise_for_status()
-            content = resp.json()["choices"][0]["message"]["content"]
-            data = json.loads(content)
-    except Exception:
-        return None  # timeout / quota / network / bad JSON -> deterministic fallback
+        future = executor.submit(_call, req, baseline)
+        data = future.result(timeout=settings.LLM_TIMEOUT)
+    except (FutureTimeout, Exception):
+        return None
+    finally:
+        executor.shutdown(wait=False)  # do not block on a hung request
 
     return _validate(data, req)
