@@ -95,8 +95,10 @@ AMOUNT_HINTS: list[str] = [
 
 # Status words a complaint might use, mapped to canonical transaction statuses.
 STATUS_WORDS: dict[str, list[str]] = {
-    "failed": ["failed", "fail", "hoyni", "hoy nai", "did not", "didnt",
-               "unsuccessful", "ব্যর্থ", "হয়নি"],
+    # NOTE: deliberately excludes bare "did not"/"didnt" — those collide with
+    # non-receipt phrasing ("didn't get it") and would wrongly tag a failed txn.
+    "failed": ["failed", "fail", "hoyni", "hoy nai", "unsuccessful",
+               "ব্যর্থ", "হয়নি"],
     "pending": ["pending", "processing", "atke", "atkay", "hocche na",
                 "wait", "অপেক্ষমাণ", "প্রসেসিং"],
     "reversed": ["reversed", "ferot eseche", "back peyechi", "returned",
