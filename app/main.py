@@ -13,7 +13,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from .config import settings
-from .llm import refine
+from .llm import analyze as llm_analyze
 from .reasoning import investigate
 from .safety import compose, sanitize_text
 from .schemas import TicketRequest, TicketResponse
@@ -28,6 +28,13 @@ app = FastAPI(
 )
 
 
+def _clamp_conf(value, fallback: float) -> float:
+    """Accept an LLM-provided confidence only if it's a valid 0..1 number."""
+    if isinstance(value, (int, float)) and 0.0 <= float(value) <= 1.0:
+        return round(float(value), 2)
+    return fallback
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     """Liveness probe. Must return {'status':'ok'} within 60s of start."""
@@ -40,17 +47,13 @@ def analyze_ticket(req: TicketRequest) -> TicketResponse:
     if not req.complaint or not req.complaint.strip():
         raise HTTPException(status_code=422, detail="complaint must not be empty")
 
-    # Deterministic investigation (the authoritative decision).
+    # Deterministic investigation always runs: it is the baseline hint for the
+    # LLM and the guaranteed-valid fallback if the LLM is off/slow/invalid.
     inv = investigate(req)
     agent_summary, next_action, customer_reply = compose(inv, req)
 
-    # Optional LLM polish (no-op unless configured); always re-sanitized.
-    refined = refine(inv, req, agent_summary, customer_reply)
-    if refined:
-        agent_summary = sanitize_text(refined["agent_summary"])
-        customer_reply = sanitize_text(refined["customer_reply"])
-
-    return TicketResponse(
+    # Build the deterministic response first.
+    resp = TicketResponse(
         ticket_id=inv.ticket_id,
         relevant_transaction_id=inv.relevant_transaction_id,
         evidence_verdict=inv.evidence_verdict,
@@ -64,6 +67,32 @@ def analyze_ticket(req: TicketRequest) -> TicketResponse:
         confidence=inv.confidence,
         reason_codes=inv.reason_codes,
     )
+
+    # Hybrid: if the LLM is enabled and returns a valid analysis, let it drive the
+    # decision fields. Pydantic re-validates enums; on any failure we keep `resp`.
+    data = llm_analyze(req, inv)
+    if data:
+        try:
+            llm_resp = TicketResponse(
+                ticket_id=inv.ticket_id,
+                relevant_transaction_id=data["relevant_transaction_id"],
+                evidence_verdict=data["evidence_verdict"],
+                case_type=data["case_type"],
+                severity=data["severity"],
+                department=data["department"],
+                agent_summary=sanitize_text(data["agent_summary"]),
+                recommended_next_action=sanitize_text(data["recommended_next_action"]),
+                customer_reply=sanitize_text(data["customer_reply"]),
+                # Safety guardrail: escalate if EITHER source flags review; never downgrade.
+                human_review_required=bool(data["human_review_required"]) or inv.human_review_required,
+                confidence=_clamp_conf(data.get("confidence"), inv.confidence),
+                reason_codes=data.get("reason_codes") or inv.reason_codes,
+            )
+            resp = llm_resp
+        except Exception:
+            logger.warning("LLM output failed schema validation; using deterministic result")
+
+    return resp
 
 
 # --------------------------------------------------------------------------- #

@@ -54,9 +54,17 @@ How the investigator reasons:
    follows the Section 7.2 mapping; `human_review_required` is set for disputes, fraud, high-value,
    and any non-`consistent` (ambiguous) evidence.
 
-An **optional LLM layer** (off by default) only *rewrites the wording* of `agent_summary` and
-`customer_reply` for clarity and language match. It never changes decisions, runs with an 8s
-timeout and silent deterministic fallback, and its output is always re-sanitized.
+### Hybrid mode (optional LLM, off by default)
+
+When an LLM is configured (`LLM_ENABLED=true` + a key), it performs the **full analysis** —
+classification, evidence reasoning, transaction selection, and drafting — constrained to the
+exact enums. The deterministic engine still runs first and is passed to the LLM as a **baseline
+hint**, and remains the **fallback**: on any timeout, rate-limit, or output that fails enum/schema
+validation, the service silently keeps the deterministic result. Two guardrails always apply to
+LLM output: the **safety sanitizer**, and **`human_review_required` escalates if either source
+flags risk** (never downgraded). A hallucinated `relevant_transaction_id` (not in the provided
+history) is rejected. This gives LLM-grade generalization on novel/multilingual phrasings without
+ever depending on the LLM being available, fast, or safe.
 
 ## Safety logic
 
@@ -80,7 +88,7 @@ confirmations, −10 third-party redirects).
 | Model | Where it runs | Why / status |
 |---|---|---|
 | **None (default)** | In-process Python rules | The service ships **LLM-off**. All scored decisions and safe replies are produced deterministically — zero cost, zero external dependency, sub-second latency. |
-| **Groq — `llama-3.3-70b-versatile`** *(suggested if LLM enabled)* | Groq cloud (OpenAI-compatible) | ~320 tok/s keeps us under the p95 ≤5s gate; free tier (30 RPM / 1,000 RPD). Used only to polish `agent_summary` + `customer_reply`. |
+| **Groq — `llama-3.3-70b-versatile`** *(suggested if LLM enabled)* | Groq cloud (OpenAI-compatible) | ~320 tok/s keeps us under the p95 ≤5s gate; free tier (30 RPM / 1,000 RPD). Drives full analysis with rules fallback. |
 | **Google `gemini-2.0-flash`** *(alt)* | Google AI (OpenAI-compat endpoint) | Free 1,500 req/day; strongest Bangla/Banglish handling. |
 | **OpenRouter `:free` models** *(alt)* | OpenRouter | One key, many free models; flexible fallback. |
 
