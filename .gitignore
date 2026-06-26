@@ -1,0 +1,29 @@
+# Secrets — NEVER commit (penalty + disqualification risk)
+.env
+.env.*
+!.env.example
+judging.env
+*.key
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log
+
+# Docker / misc
+*.tar
+
+# Tooling
+.puku/

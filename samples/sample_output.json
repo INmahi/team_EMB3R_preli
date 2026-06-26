@@ -1,0 +1,39 @@
+{
+  "input": {
+    "ticket_id": "TKT-001",
+    "complaint": "I sent 5000 taka to a wrong number around 2pm today. Please help me get it back.",
+    "language": "en",
+    "channel": "in_app_chat",
+    "user_type": "customer",
+    "campaign_context": "boishakh_bonanza_day_1",
+    "transaction_history": [
+      {
+        "transaction_id": "TXN-9101",
+        "timestamp": "2026-04-14T14:08:22Z",
+        "type": "transfer",
+        "amount": 5000,
+        "counterparty": "+8801719876543",
+        "status": "completed"
+      }
+    ]
+  },
+  "output": {
+    "ticket_id": "TKT-001",
+    "relevant_transaction_id": "TXN-9101",
+    "evidence_verdict": "consistent",
+    "case_type": "wrong_transfer",
+    "severity": "high",
+    "department": "dispute_resolution",
+    "agent_summary": "Customer reports a transfer sent to the wrong recipient linked to transaction TXN-9101; the transaction history supports the complaint. Severity high, routed to dispute_resolution.",
+    "recommended_next_action": "Verify the referenced transaction against official records and open a dispute-resolution case to attempt recovery from the receiving party. Flag for human review before any final action.",
+    "customer_reply": "Thank you for reaching out. We understand your concern about a transfer that may have gone to the wrong recipient, and we have logged your ticket (TKT-001) for review by our dispute-resolution team. We cannot confirm any reversal at this stage, but any eligible amount will be returned through official channels after review. For your safety, never share your PIN, OTP, or password with anyone; our staff will never ask for them.",
+    "human_review_required": true,
+    "confidence": 0.85,
+    "reason_codes": [
+      "wrong_transfer",
+      "transaction_match",
+      "evidence_consistent",
+      "elevated_severity"
+    ]
+  }
+}
