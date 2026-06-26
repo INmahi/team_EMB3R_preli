@@ -27,3 +27,8 @@ Thumbs.db
 
 # Tooling
 .puku/
+
+# Competition source docs (kept local, not pushed)
+sust_cse_carnival_2026_rubric.md
+SUST_CSE_Carnival_2026_Team_Instructions.md
+SUST_Hackathon_Preli_Problem_Statement.md
