@@ -76,6 +76,26 @@ service silently falls back to deterministic text.
      -H "Content-Type: application/json" -d @samples/sample_input.json
    ```
 
+## 5b. Pre-built Docker image (submission Path B)
+
+A GitHub Actions workflow (`.github/workflows/docker-publish.yml`) builds and pushes the
+image to GHCR on every push to `main`. Judges can pull and run it with no source build:
+
+```bash
+docker pull ghcr.io/inmahi/team_emb3r_preli:latest
+docker run --rm -p 8000:8000 ghcr.io/inmahi/team_emb3r_preli:latest
+# then: curl http://localhost:8000/health
+```
+
+Runs in deterministic mode out of the box (no key needed). To enable the LLM, pass env vars:
+```bash
+docker run --rm -p 8000:8000 --env-file judging.env ghcr.io/inmahi/team_emb3r_preli:latest
+```
+
+> One-time: after the first workflow run, make the GHCR package **public** so judges can pull it —
+> GitHub → your profile → **Packages** → `team_emb3r_preli` → **Package settings** →
+> **Change visibility → Public**.
+
 ## 6. Submission
 
 - **Path A (preferred):** the live Railway URL above.
