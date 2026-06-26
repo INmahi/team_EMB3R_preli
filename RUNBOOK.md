@@ -31,7 +31,7 @@ curl -X POST http://localhost:8000/analyze-ticket \
 
 ```bash
 pip install -r requirements.txt
-pytest -q          # 23 tests: reasoning, safety, API contract
+pytest -q          # 40 tests: reasoning, safety, API contract, LLM guardrails, 10 sample cases
 ```
 
 ## 3. Run with Docker
@@ -47,8 +47,9 @@ docker run --rm -p 8000:8000 --env-file .env queuestorm
 
 ## 4. Enable the optional LLM (optional)
 
-The service scores fully without this. To turn on LLM-polished text, set these env vars
-(in `.env` locally, or the hosting dashboard in production — never commit real keys):
+The service scores fully without this. To enable full LLM analysis (with deterministic
+fallback + guardrails), set these env vars (in `.env` locally, or the hosting dashboard in
+production — never commit real keys):
 
 ```env
 LLM_ENABLED=true
@@ -98,9 +99,10 @@ docker run --rm -p 8000:8000 --env-file judging.env ghcr.io/inmahi/team_emb3r_pr
 
 ## 6. Submission
 
-- **Path A (preferred):** the live Railway URL above.
-- **Path B (fallback):** `docker build` / `docker run` commands in section 3.
-- **Path C (fallback):** this runbook.
+- **Path A (preferred):** the live Railway URL above (section 5).
+- **Path B (fallback):** pre-built Docker image — `docker pull ghcr.io/inmahi/team_emb3r_preli:latest`
+  (section 5b; anonymous pull enabled). Build-from-source alternative in section 3.
+- **Path C (fallback):** this runbook + repo.
 - Repo: private is fine — add organizer **`bipulhf`** with **read** access before the deadline.
 - Required in repo: `README.md` (incl. MODELS), `requirements.txt`, `.env.example`,
   `samples/sample_output.json`. **No real secrets / no real customer or payment data.**
