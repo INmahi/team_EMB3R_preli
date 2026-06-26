@@ -1,13 +1,20 @@
 # QueueStorm Investigator
 
-An AI/API **support copilot** for a digital-finance platform, built for **bKash presents SUST CSE
-Carnival 2026 — Codex Community Hackathon (Online Preliminary)**. It receives one customer
-complaint plus a snippet of the customer's recent transaction history and returns a single
-structured JSON response that **classifies, routes, and explains** the case — acting as an
-*investigator* (reasoning from evidence), not just a classifier.
+An **LLM-powered** AI/API **support copilot** for a digital-finance platform, built for **bKash
+presents SUST CSE Carnival 2026 — Codex Community Hackathon (Online Preliminary)**. Given a customer
+complaint plus a snippet of the customer's recent transaction history, a large language model
+**investigates** the case — reading both the complaint and the evidence, deciding what actually
+happened, classifying and routing it, and drafting a safe customer reply — returned as a single
+structured JSON response.
+
+The LLM is the brain that does the reasoning; a fast deterministic engine sits underneath as a
+**safety net and fallback**, so the service is always schema-correct, safe, and reachable even if
+the model is slow, rate-limited, or unavailable.
 
 - **Live URL:** `https://teamemb3rpreli-production.up.railway.app`
 - **Docker image (fallback):** `ghcr.io/inmahi/team_emb3r_preli:latest`
+
+> **Team:** TEAM EMB3R · Team leader: ishatnoormahi@gmail.com
 
 ---
 
@@ -15,7 +22,7 @@ structured JSON response that **classifies, routes, and explains** the case — 
 1. [API endpoints](#api-endpoints)
 2. [Architecture](#architecture)
 3. [How a request is handled](#how-a-request-is-handled)
-4. [AI approach (deterministic + hybrid LLM)](#ai-approach)
+4. [AI approach (LLM-first hybrid)](#ai-approach)
 5. [MODELS](#models)
 6. [Safety logic](#safety-logic)
 7. [Cost reasoning](#cost-reasoning)
@@ -96,10 +103,10 @@ A full worked input+output pair is in [`samples/sample_output.json`](samples/sam
 app/
   main.py       FastAPI app: /health, /analyze-ticket, exception handlers (400/422/500)
   schemas.py    Pydantic v2 models + exact enum taxonomy
-  reasoning.py  Deterministic investigation engine (matching, verdict, classify, route)
-  keywords.py   Multilingual (en / bn / banglish) keyword maps
+  llm.py        LLM analysis — primary decision-maker (OpenAI-compatible, pluggable)
+  reasoning.py  Deterministic engine — fallback, grounding baseline, and guardrails
+  keywords.py   Multilingual (en / bn / banglish) keyword maps used by the fallback
   safety.py     Safe-by-construction reply templates + a hard output sanitizer
-  llm.py        OPTIONAL OpenAI-compatible LLM analysis (off by default, pluggable)
   config.py     Env-only configuration
 tests/          39+ unit/contract tests, incl. all 10 public sample cases
 scripts/        sample-output generation + live/LLM evaluation helpers
@@ -113,7 +120,7 @@ POST /analyze-ticket  { ticket_id, complaint, transaction_history }
         ▼
 1. Pydantic validation ──► bad shape = 400 · empty complaint = 422
 2. investigate()       ──► deterministic baseline answer (always runs)
-3. IF LLM enabled+key: llm.analyze() asks the model for its OWN full answer
+3. IF LLM enabled (default:enabled) +key: llm.analyze() asks the model for its OWN full answer
         │                 (validated: enums + no hallucinated txn id; else discard)
         ▼
 4. Guardrails merge ──► ambiguity veto · human_review escalation
@@ -130,68 +137,70 @@ The service is **stateless** — each ticket is analyzed independently.
 
 1. **Validate** — Pydantic enforces required fields, types, and enums. Malformed JSON / missing
    fields → `400`; empty complaint → `422`. Unknown extra fields are tolerated, not rejected.
-2. **Investigate (deterministic, always runs)** — produces a complete, valid baseline:
-   - **Transaction matching**: scores each history row against the complaint by amount,
-     counterparty/phone, transaction type, status words, and explicit id mention. Picks the best
-     match above a threshold; returns `null` if nothing matches or several tie (ambiguous).
-   - **Evidence verdict**: `consistent` / `inconsistent` (e.g. claim "failed" but status
-     `completed`, amount mismatch, or repeated prior transfers to the same recipient) /
-     `insufficient_data`.
-   - **Classify / severity / route / escalate**: per the Section 7 taxonomy.
-3. **LLM analysis (only if enabled)** — see hybrid mode below.
-4. **Guardrails + safety** — merge, then sanitize all text.
+2. **Compute a deterministic baseline** — a fast rules pass (transaction matching → evidence
+   verdict → classify/severity/route) produces a guaranteed-valid answer used to ground the LLM
+   and as the fallback.
+3. **LLM analysis (primary decision)** — the model reads the complaint, history, enums, and that
+   baseline, and returns its own full analysis; **its decisions are what we return** when valid.
+4. **Guardrails + safety** — ambiguity veto, hallucination/enum checks, human-review escalation,
+   then the safety sanitizer on all text; on any LLM failure, fall back to the baseline.
 5. **Respond** — `200` with the schema above.
 
 ---
 
 ## AI approach
 
-A **hybrid** design that is correct and fast with **zero models**, and smarter when an LLM is on.
+The service is **LLM-first**: a large language model is the primary intelligence that reads each
+ticket and decides the outcome. A deterministic engine wraps it as a reliability and safety layer
+so the AI's intelligence is never a liability under judging conditions.
 
-### Deterministic engine (default, always on)
-A transparent rules engine produces every scored field — `relevant_transaction_id`,
-`evidence_verdict`, `case_type`, `severity`, `department`, `human_review_required`. It is
-sub-millisecond, free, reproducible, and immune to prompt injection. Classification uses
-multilingual keyword + evidence scoring; **phishing/social-engineering wins ties** so risky
-cases are never under-routed. It is calibrated against all 10 public sample cases (10/10).
+### LLM analysis (primary)
+The LLM performs the **full investigation**: it reads the complaint + the transaction history + the
+allowed enums (and a deterministic baseline as grounding) and returns its **own** decisions —
+`relevant_transaction_id`, `evidence_verdict`, `case_type`, `severity`, `department`,
+`human_review_required` — plus the `agent_summary`, `recommended_next_action`, and `customer_reply`.
+**The LLM's decisions are what the service returns.** This is what gives the system real
+language understanding: it generalizes to novel phrasings and to Bangla/Banglish that fixed rules
+would miss, and it writes natural, context-aware replies. Default model: **Groq
+`llama-3.3-70b-versatile`** (≈1.4s/call). See [MODELS](#models); the provider is swappable by env.
 
-### Hybrid mode (optional LLM)
-When `LLM_ENABLED=true` and a key is set, the LLM performs the **full analysis** itself —
-it reads the complaint + transaction history + the allowed enums + the deterministic baseline
-(as a strong hint) and returns its **own** classification, evidence verdict, transaction
-selection, and drafted text. **When valid, the LLM's decisions win.** The deterministic engine
-stays in three roles:
+### Deterministic engine (reliability & safety layer)
+Running an LLM as the decision-maker introduces three risks under a judge harness — it can be
+**slow/down**, it can return **invalid/hallucinated** output, and it can be **unsafe** or
+prompt-injected. A transparent rules engine (sub-millisecond, free, reproducible) neutralizes all
+three:
 
-- **Baseline hint** fed into the prompt for grounding.
-- **Fallback** — on timeout, rate-limit, or output that fails enum/schema validation, the
-  service silently keeps the deterministic result. A hard wall-clock timeout guarantees we never
-  breach the 30s limit even if a provider hangs.
-- **Guardrail** — (1) if the matcher detected an ambiguous tie, the LLM may **not** guess a
-  transaction (we force `null`/`insufficient_data`); (2) a hallucinated `relevant_transaction_id`
-  not present in the history is rejected; (3) `human_review_required` escalates if **either**
-  source flags risk (never downgraded); (4) the safety sanitizer always runs on LLM text.
+- **Fallback** — it always computes a complete, valid answer first; on any LLM timeout,
+  rate-limit, or schema/enum-invalid output the service returns that instead. A hard wall-clock
+  timeout guarantees we never breach the 30s limit even if a provider hangs.
+- **Grounding** — its answer is fed to the LLM as a baseline hint to anchor reasoning.
+- **Guardrails on LLM output** — (1) an ambiguous-match veto stops the LLM from *guessing* a
+  transaction (forces `null`/`insufficient_data`); (2) a hallucinated `relevant_transaction_id`
+  not in the history is rejected; (3) `human_review_required` escalates if **either** source flags
+  risk (never downgraded); (4) the safety sanitizer always runs on LLM text.
 
-This gives LLM-grade generalization on novel/multilingual phrasings **without ever depending on
-the LLM being available, fast, or safe.** Measured: deterministic 10/10, Groq LLM alone 9/10
-(guessed on the ambiguous case), full hybrid 10/10 at ~1.4s/call.
+**Measured on the public sample pack:** LLM-only 9/10 (it guessed on the ambiguous case),
+deterministic 10/10, and the **full system 10/10** — i.e. the safety layer lets us keep the LLM's
+generalization while recovering the one case it would have gotten wrong, with zero dependency risk.
 
 ---
 
 ## MODELS
 
-| Model | Where it runs | Role / why chosen |
-|---|---|---|
-| **None (rules engine)** — default | In-process Python | Ships LLM-off: all decisions + safe replies produced deterministically. Zero cost, zero dependency, sub-second latency, immune to prompt injection. |
-| **Groq — `llama-3.3-70b-versatile`** *(recommended LLM)* | Groq cloud (OpenAI-compatible) | ~320 tok/s keeps p95 ≤ 5s; free tier (30 req/min, 1,000/day). Drives full analysis with rules fallback. |
-| **Google `gemini-2.0-flash`** *(alternative)* | Google AI (OpenAI-compat endpoint) | Free 1,500 req/day; strong Bangla/Banglish. |
-| **OpenRouter `:free` models** *(alternative)* | OpenRouter | One key, many free models. |
+| Model | Role | Where it runs | Why chosen |
+|---|---|---|---|
+| **Groq — `llama-3.3-70b-versatile`** | **Primary** — full analysis | Groq cloud (OpenAI-compatible) | ≈320 tok/s keeps p95 ≤ 5s; free tier (30 req/min, 1,000/day); strong reasoning + multilingual. Default model. |
+| **Google `gemini-2.0-flash`** | Alternative LLM | Google AI (OpenAI-compat endpoint) | Free 1,500 req/day; very strong Bangla/Banglish. |
+| **OpenRouter `:free` models** | Alternative LLM | OpenRouter | One key, many free models. |
+| **Deterministic rules engine** | Fallback / safety layer | In-process Python | Sub-millisecond, free, reproducible; guarantees a valid, safe answer whenever the LLM is unavailable or invalid. |
 
 The LLM is **pluggable via environment variables only** — switch providers with no code change.
 
 ## Cost reasoning
-Default operation is **$0** (rules only). With the LLM enabled, one short request per ticket goes
-to a **free-tier** provider, so expected cost stays ~$0 within free limits; on any quota/latency
-failure the service falls back to the free deterministic path. No GPU, no paid APIs required.
+Running cost is effectively **$0**: the primary LLM uses a **free-tier** provider (one short request
+per ticket), and if free limits or latency are ever hit, the service falls back to the **free**
+deterministic engine. **No GPU, no paid APIs, no model weights to host** — keeping the image small
+and the per-request cost negligible.
 
 ---
 
@@ -217,7 +226,7 @@ Safety is enforced **structurally**, not hoped for — mapping to the Section 8 
 ## Tech stack
 - **Python 3.12 + FastAPI + Uvicorn** — async HTTP service.
 - **Pydantic v2** — enforces the exact schema/enums and the 200/400/422 contract.
-- **httpx** — used only by the optional LLM layer.
+- **httpx** — calls the LLM provider (OpenAI-compatible API).
 - No GPU, no baked model weights → small image, fast cold start.
 
 ---
