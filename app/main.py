@@ -72,11 +72,18 @@ def analyze_ticket(req: TicketRequest) -> TicketResponse:
     # decision fields. Pydantic re-validates enums; on any failure we keep `resp`.
     data = llm_analyze(req, inv)
     if data:
+        # Guardrail: when the rules matcher found a genuine tie, never let the LLM
+        # guess a transaction — defer to the deterministic "don't guess" result.
+        rid = data["relevant_transaction_id"]
+        verdict = data["evidence_verdict"]
+        if inv.ambiguous_match:
+            rid = inv.relevant_transaction_id
+            verdict = inv.evidence_verdict.value
         try:
             llm_resp = TicketResponse(
                 ticket_id=inv.ticket_id,
-                relevant_transaction_id=data["relevant_transaction_id"],
-                evidence_verdict=data["evidence_verdict"],
+                relevant_transaction_id=rid,
+                evidence_verdict=verdict,
                 case_type=data["case_type"],
                 severity=data["severity"],
                 department=data["department"],

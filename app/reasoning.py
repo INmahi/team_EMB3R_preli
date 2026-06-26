@@ -86,6 +86,8 @@ class Investigation:
     reason_codes: list[str] = field(default_factory=list)
     matched: Optional[TransactionEntry] = None
     amount_in_complaint: Optional[float] = None
+    # True when several transactions matched equally well -> never guess one.
+    ambiguous_match: bool = False
 
 
 # --------------------------------------------------------------------------- #
@@ -183,16 +185,16 @@ def _score_entry(
 
 def match_transaction(
     req: TicketRequest, amounts: list[float], case_type_hint: Optional[CaseType]
-) -> tuple[Optional[TransactionEntry], float]:
-    """Return (best_entry, score). Returns (None, 0.0) when no clear single match.
+) -> tuple[Optional[TransactionEntry], float, bool]:
+    """Return (best_entry, score, ambiguous).
 
-    If several entries tie for the top score (ambiguous), we refuse to guess and
-    return None -- EXCEPT for duplicate_payment, where the latest tied entry (the
-    likely duplicate) is returned.
+    Returns (None, 0.0, False) when nothing matches. If several entries tie for the
+    top score we refuse to guess and return (None, 0.0, True) -- EXCEPT for
+    duplicate_payment, where the latest tied entry (the likely duplicate) is returned.
     """
     history = req.transaction_history or []
     if not history:
-        return None, 0.0
+        return None, 0.0, False
 
     complaint = normalize(req.complaint).translate(_BN_DIGITS)
     phones = set(extract_phone_digits(req.complaint))
@@ -202,17 +204,17 @@ def match_transaction(
     ]
     max_core = max(s for s, _ in scored)
     if max_core < 1.0:
-        return None, 0.0
+        return None, 0.0, False
 
     top = [e for s, e in scored if s >= max_core - 0.01]
     if len(top) > 1 and len({e.transaction_id for e in top}) > 1:
         if case_type_hint == CaseType.duplicate_payment:
             best = max(top, key=lambda e: _timestamp_rank(e.timestamp))
-            return best, max_core
-        return None, 0.0  # genuinely ambiguous -> do not guess
+            return best, max_core, False
+        return None, 0.0, True  # genuinely ambiguous -> do not guess
 
     best = max(scored, key=lambda t: (t[0], _timestamp_rank(t[1].timestamp)))[1]
-    return best, max_core
+    return best, max_core, False
 
 
 # --------------------------------------------------------------------------- #
@@ -427,7 +429,7 @@ def investigate(req: TicketRequest) -> Investigation:
     amounts = extract_amounts(req.complaint)
 
     case_type, strength = classify_case_type(req)
-    matched, _score = match_transaction(req, amounts, case_type)
+    matched, _score, ambiguous = match_transaction(req, amounts, case_type)
     verdict = determine_verdict(case_type, matched, amounts, req)
     severity = determine_severity(case_type, verdict, amounts, matched)
     department = route_department(case_type, verdict, severity)
@@ -447,4 +449,5 @@ def investigate(req: TicketRequest) -> Investigation:
         reason_codes=reason_codes,
         matched=matched,
         amount_in_complaint=amounts[0] if amounts else None,
+        ambiguous_match=ambiguous,
     )

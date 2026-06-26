@@ -92,6 +92,38 @@ def test_orchestration_uses_llm_output_and_sanitizes(monkeypatch):
     assert body["human_review_required"] is True
 
 
+def test_ambiguity_guardrail_vetoes_llm_guess(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import app.main as main
+
+    # LLM guesses a specific transaction on an ambiguous case; guardrail must veto.
+    def fake_analyze(req, inv):
+        return {
+            "relevant_transaction_id": "TXN-9801", "evidence_verdict": "inconsistent",
+            "case_type": "wrong_transfer", "severity": "medium",
+            "department": "dispute_resolution", "agent_summary": "s",
+            "recommended_next_action": "a", "customer_reply": "Thank you.",
+            "human_review_required": True, "confidence": 0.7, "reason_codes": [],
+        }
+
+    monkeypatch.setattr(main, "llm_analyze", fake_analyze)
+    client = TestClient(main.app, raise_server_exceptions=False)
+    r = client.post("/analyze-ticket", json={
+        "ticket_id": "TKT-008",
+        "complaint": "I sent 1000 to my brother yesterday but he says he didn't get it.",
+        "transaction_history": [
+            {"transaction_id": "TXN-9801", "type": "transfer", "amount": 1000, "counterparty": "+8801712001122", "status": "completed"},
+            {"transaction_id": "TXN-9802", "type": "transfer", "amount": 1000, "counterparty": "+8801812334455", "status": "completed"},
+            {"transaction_id": "TXN-9803", "type": "transfer", "amount": 1000, "counterparty": "+8801712001122", "status": "failed"},
+        ],
+    })
+    body = r.json()
+    assert body["relevant_transaction_id"] is None          # vetoed the guess
+    assert body["evidence_verdict"] == "insufficient_data"   # deferred, not guessed
+    assert body["case_type"] == "wrong_transfer"             # LLM classification kept
+
+
 def test_validate_accepts_null_transaction_id():
     req = _req()
     good = {
