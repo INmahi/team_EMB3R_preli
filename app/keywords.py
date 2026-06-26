@@ -37,6 +37,11 @@ CASE_KEYWORDS: dict[str, list[str]] = {
         "vul manush", "bhul manushe", "vul jaygay", "wrong e chole gese",
         "ভুল নম্বর", "ভুল মানুষ", "ভুল জায়গায়", "ভুল করে",
         "onno number", "onno manush", "onner kache chole gese",
+        # Money sent but recipient did not receive it (peer-to-peer non-receipt).
+        "didn't get", "didnt get", "did not get", "didn't receive",
+        "didnt receive", "did not receive", "didn't reach", "didnt reach",
+        "did not reach", "hasn't received", "hasnt received", "never received",
+        "paini", "pay nai", "পায়নি", "পাইনি",
     ],
     "duplicate_payment": [
         "duplicate", "double charge", "charged twice", "charged two times",
@@ -53,6 +58,10 @@ CASE_KEYWORDS: dict[str, list[str]] = {
         "payment hoyni", "transaction hoyni", "lenden hoyni", "failed hoyse",
         "taka kete fail", "kete niyeche kintu hoyni", "payment hocche na",
         "ব্যর্থ", "টাকা কেটে নিয়েছে কিন্তু", "পেমেন্ট হয়নি", "লেনদেন ব্যর্থ",
+        # "showed failed" + "balance deducted" style (deduction without success).
+        "failed", "deducted", "balance was deducted", "money was deducted",
+        "balance deducted", "amount deducted", "taka kete", "kete niyeche",
+        "kete nise", "টাকা কেটে",
     ],
     "refund_request": [
         "refund", "money back", "return my money", "want my money back",
@@ -68,6 +77,7 @@ CASE_KEYWORDS: dict[str, list[str]] = {
         "settlement asheni", "settlement pai nai", "dokane taka ashe nai",
         "settlement hoyni", "merchant settlement", "store payment pending",
         "সেটেলমেন্ট", "দোকানের টাকা", "মার্চেন্ট",
+        "settled", "not been settled", "not settled", "settle hoyni",
     ],
     "agent_cash_in_issue": [
         "cash in", "cash-in", "cashin", "agent", "deposit through agent",

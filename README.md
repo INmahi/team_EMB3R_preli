@@ -174,6 +174,8 @@ See [`.env.example`](.env.example). **No real secrets are committed.**
   mitigates this, and unmatched cases fall back to `other` + `customer_support` safely.
 - Transaction matching is heuristic; genuinely ambiguous cases are intentionally marked
   `insufficient_data` and escalated for human review rather than guessed.
-- The public sample pack was not yet available at build time; thresholds are calibrated to the
-  written spec and the worked example, and `tests/test_samples.py` can ingest the official pack
-  when provided for further calibration.
+- The engine is calibrated against all 10 public sample cases (`tests/test_samples.py` asserts
+  functional equivalence on `relevant_transaction_id`, `evidence_verdict`, `case_type`,
+  `department`, `severity`, and `human_review_required`, plus a `customer_reply` safety check).
+  Hidden tests will include cases beyond these ten; the rules aim for general robustness, and
+  genuinely ambiguous cases are marked `insufficient_data` and escalated rather than guessed.

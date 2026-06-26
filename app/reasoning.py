@@ -8,6 +8,7 @@ Given a ticket, decide:
 
 This is the evidence-reasoning core (35% of the score) and is fully deterministic:
 fast, free, and reproducible. Text fields are composed separately in safety.py.
+Rules are calibrated against the public sample case pack (see tests/test_samples.py).
 """
 from __future__ import annotations
 
@@ -25,9 +26,11 @@ from .schemas import (
     TransactionEntry,
 )
 
-# Money thresholds (BDT) used for severity and high-value escalation.
+# Money thresholds (BDT).
 HIGH_VALUE = 10_000
 CRITICAL_VALUE = 50_000
+# Numbers above this are treated as non-money (IDs/phones that slipped through).
+AMOUNT_SANITY_MAX = 10_000_000
 
 # Deterministic case_type -> department map (Problem Statement Section 7.2).
 DEPARTMENT_MAP: dict[CaseType, Department] = {
@@ -51,11 +54,27 @@ CASE_TXN_TYPE: dict[CaseType, set[str]] = {
     CaseType.agent_cash_in_issue: {"cash_in"},
 }
 
+# Cases that, once a transaction is identified, need a human to authorize recovery/dispute.
+REVIEW_IF_MATCHED = {
+    CaseType.wrong_transfer,
+    CaseType.duplicate_payment,
+    CaseType.agent_cash_in_issue,
+}
+
+# Loss-type cases that are "high" severity once the evidence confirms them.
+LOSS_TYPES = {
+    CaseType.wrong_transfer,
+    CaseType.payment_failed,
+    CaseType.agent_cash_in_issue,
+    CaseType.duplicate_payment,
+}
+
+_BN_DIGITS = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
+_PHONE_RE = re.compile(r"\+?8801\d{8}|\b01\d{9}\b")
+
 
 @dataclass
 class Investigation:
-    """All deterministic decision outputs plus the signals behind them."""
-
     ticket_id: str
     relevant_transaction_id: Optional[str]
     evidence_verdict: EvidenceVerdict
@@ -79,30 +98,32 @@ def normalize(text: str) -> str:
 def extract_amounts(text: str) -> list[float]:
     """Pull plausible money amounts from complaint text.
 
-    Handles `5000`, `5,000`, `5000 taka`, `5k`. Only amounts near a currency hint
-    OR standalone numbers >= 50 are kept (to avoid grabbing PINs/years/counts).
+    Bangla numerals are converted to ASCII. Phone numbers are removed first so
+    they are never mistaken for amounts. Numbers are kept if near a currency hint
+    or >= 50, and absurdly large values (IDs) are dropped.
     """
-    t = normalize(text)
-    amounts: list[float] = []
+    t = normalize(text).translate(_BN_DIGITS)
+    t = _PHONE_RE.sub(" ", t)  # drop phone numbers before parsing amounts
 
-    # `5k` / `5 k` style.
+    amounts: list[float] = []
     for m in re.finditer(r"(\d+(?:\.\d+)?)\s*k\b", t):
         amounts.append(float(m.group(1)) * 1000)
 
-    # Plain numbers with optional thousands separators.
     for m in re.finditer(r"(?<!\d)(\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?", t):
         raw = m.group(0).replace(",", "")
+        digits = re.sub(r"\D", "", raw)
+        if len(digits) >= 11:  # phone-length leftover -> not money
+            continue
         try:
             val = float(raw)
         except ValueError:
             continue
-        # Keep if it looks like money: near a currency word, or a "round-ish" amount.
+        if val > AMOUNT_SANITY_MAX:
+            continue
         window = t[max(0, m.start() - 12): m.end() + 8]
-        near_currency = any(h in window for h in AMOUNT_HINTS)
-        if near_currency or val >= 50:
+        if any(h in window for h in AMOUNT_HINTS) or val >= 50:
             amounts.append(val)
 
-    # De-dup while preserving order.
     seen: set[float] = set()
     out: list[float] = []
     for a in amounts:
@@ -113,85 +134,17 @@ def extract_amounts(text: str) -> list[float]:
 
 
 def extract_phone_digits(text: str) -> list[str]:
-    """Extract Bangladeshi-style phone numbers, normalized to trailing digits."""
-    t = text or ""
-    raw = re.findall(r"\+?8801\d{8}|\b01\d{9}\b", t)
-    return [r[-10:] for r in raw]  # last 10 digits as a comparable key
+    raw = _PHONE_RE.findall(text or "")
+    return [r[-10:] for r in raw]
 
 
 def _amounts_match(a: Optional[float], b: Optional[float]) -> bool:
     if a is None or b is None:
         return False
-    # Exact, or within 1 BDT to tolerate float noise.
     return abs(a - b) <= 1.0
 
 
-# --------------------------------------------------------------------------- #
-# Transaction matching                                                         #
-# --------------------------------------------------------------------------- #
-def match_transaction(
-    req: TicketRequest, amounts: list[float], case_type_hint: Optional[CaseType]
-) -> tuple[Optional[TransactionEntry], float]:
-    """Score each history entry against the complaint; return (best, score).
-
-    Returns (None, 0.0) when history is empty or nothing clears the threshold.
-    """
-    history = req.transaction_history or []
-    if not history:
-        return None, 0.0
-
-    complaint = normalize(req.complaint)
-    phones = set(extract_phone_digits(req.complaint))
-
-    best: Optional[TransactionEntry] = None
-    best_score = 0.0
-
-    for entry in history:
-        score = 0.0
-
-        # Amount match — strongest signal.
-        if entry.amount is not None and any(_amounts_match(entry.amount, a) for a in amounts):
-            score += 3.0
-
-        # Counterparty / phone match.
-        if entry.counterparty:
-            cp_digits = (entry.counterparty or "")[-10:]
-            if cp_digits and cp_digits in phones:
-                score += 3.0
-            elif normalize(entry.counterparty) and normalize(entry.counterparty) in complaint:
-                score += 1.5
-
-        # Transaction type aligns with the inferred case type.
-        if case_type_hint and entry.type in CASE_TXN_TYPE.get(case_type_hint, set()):
-            score += 1.0
-
-        # Status word in complaint matches this entry's status.
-        if entry.status:
-            for canon, words in STATUS_WORDS.items():
-                if entry.status == canon and any(w in complaint for w in words):
-                    score += 1.0
-                    break
-
-        # Explicit transaction id mentioned in the complaint.
-        if entry.transaction_id and normalize(entry.transaction_id) in complaint:
-            score += 4.0
-
-        # Tiny recency nudge so ties prefer the latest transaction.
-        if entry.timestamp:
-            score += 0.001 * _timestamp_rank(entry.timestamp)
-
-        if score > best_score:
-            best_score = score
-            best = entry
-
-    # Require a minimum signal to claim a match.
-    if best_score >= 1.0:
-        return best, best_score
-    return None, 0.0
-
-
 def _timestamp_rank(ts: str) -> float:
-    """Cheap monotonic rank from an ISO-ish timestamp (digits only)."""
     digits = re.sub(r"\D", "", ts or "")
     try:
         return float(digits[:14]) if digits else 0.0
@@ -200,10 +153,77 @@ def _timestamp_rank(ts: str) -> float:
 
 
 # --------------------------------------------------------------------------- #
+# Transaction matching                                                         #
+# --------------------------------------------------------------------------- #
+def _score_entry(
+    entry: TransactionEntry, complaint: str, amounts: list[float],
+    phones: set[str], case_type_hint: Optional[CaseType],
+) -> float:
+    """Core match score for one entry (excludes the recency tiebreak)."""
+    score = 0.0
+    if entry.amount is not None and any(_amounts_match(entry.amount, a) for a in amounts):
+        score += 3.0
+    if entry.counterparty:
+        cp_digits = (entry.counterparty or "")[-10:]
+        if cp_digits and cp_digits in phones:
+            score += 3.0
+        elif normalize(entry.counterparty) and normalize(entry.counterparty) in complaint:
+            score += 1.5
+    if case_type_hint and entry.type in CASE_TXN_TYPE.get(case_type_hint, set()):
+        score += 1.0
+    if entry.status:
+        for canon, words in STATUS_WORDS.items():
+            if entry.status == canon and any(w in complaint for w in words):
+                score += 1.0
+                break
+    if entry.transaction_id and normalize(entry.transaction_id) in complaint:
+        score += 4.0
+    return score
+
+
+def match_transaction(
+    req: TicketRequest, amounts: list[float], case_type_hint: Optional[CaseType]
+) -> tuple[Optional[TransactionEntry], float]:
+    """Return (best_entry, score). Returns (None, 0.0) when no clear single match.
+
+    If several entries tie for the top score (ambiguous), we refuse to guess and
+    return None -- EXCEPT for duplicate_payment, where the latest tied entry (the
+    likely duplicate) is returned.
+    """
+    history = req.transaction_history or []
+    if not history:
+        return None, 0.0
+
+    complaint = normalize(req.complaint).translate(_BN_DIGITS)
+    phones = set(extract_phone_digits(req.complaint))
+
+    scored = [
+        (_score_entry(e, complaint, amounts, phones, case_type_hint), e) for e in history
+    ]
+    max_core = max(s for s, _ in scored)
+    if max_core < 1.0:
+        return None, 0.0
+
+    top = [e for s, e in scored if s >= max_core - 0.01]
+    if len(top) > 1 and len({e.transaction_id for e in top}) > 1:
+        if case_type_hint == CaseType.duplicate_payment:
+            best = max(top, key=lambda e: _timestamp_rank(e.timestamp))
+            return best, max_core
+        return None, 0.0  # genuinely ambiguous -> do not guess
+
+    best = max(scored, key=lambda t: (t[0], _timestamp_rank(t[1].timestamp)))[1]
+    return best, max_core
+
+
+# --------------------------------------------------------------------------- #
 # Classification                                                               #
 # --------------------------------------------------------------------------- #
 def classify_case_type(req: TicketRequest) -> tuple[CaseType, int]:
-    """Keyword + evidence classification. Returns (case_type, hit_strength)."""
+    """Keyword + evidence classification. Returns (case_type, hit_strength).
+
+    With zero textual cues we return `other` and ignore data-only nudges -- the
+    service should not invent a classification from transaction data alone.
+    """
     complaint = normalize(req.complaint)
 
     scores: dict[str, int] = {}
@@ -212,35 +232,50 @@ def classify_case_type(req: TicketRequest) -> tuple[CaseType, int]:
         if hits:
             scores[case] = hits
 
-    # Evidence-based nudges from the transaction history types present.
-    history_types = {e.type for e in (req.transaction_history or []) if e.type}
-    if "settlement" in history_types:
-        scores["merchant_settlement_delay"] = scores.get("merchant_settlement_delay", 0) + 1
-    if "cash_in" in history_types:
-        scores["agent_cash_in_issue"] = scores.get("agent_cash_in_issue", 0) + 1
-
-    # Duplicate detection: two completed entries sharing amount + counterparty.
-    if _has_duplicate(req):
-        scores["duplicate_payment"] = scores.get("duplicate_payment", 0) + 2
-
     if not scores:
         return CaseType.other, 0
 
-    # Safety-critical: phishing wins ties so risky cases are never under-routed.
+    history_types = {e.type for e in (req.transaction_history or []) if e.type}
+    if "settlement" in history_types and "merchant_settlement_delay" in scores:
+        scores["merchant_settlement_delay"] += 1
+    if "cash_in" in history_types and "agent_cash_in_issue" in scores:
+        scores["agent_cash_in_issue"] += 1
+    if _has_duplicate(req):
+        scores["duplicate_payment"] = scores.get("duplicate_payment", 0) + 2
+
     best = max(scores.items(), key=lambda kv: (kv[1], kv[0] == "phishing_or_social_engineering"))
     return CaseType(best[0]), best[1]
 
 
 def _has_duplicate(req: TicketRequest) -> bool:
+    # A genuine duplicate charge is two COMPLETED payments with the same
+    # amount/counterparty/type. A completed + failed pair is not a duplicate.
     seen: set[tuple] = set()
     for e in req.transaction_history or []:
-        if e.amount is None:
+        if e.amount is None or e.status != "completed":
             continue
         key = (e.amount, e.counterparty, e.type)
         if key in seen:
             return True
         seen.add(key)
     return False
+
+
+def _established_recipient(req: TicketRequest, matched: Optional[TransactionEntry]) -> bool:
+    """True if the matched counterparty has >=2 OTHER completed transfers/payments.
+
+    A history of repeated transfers to the same recipient contradicts a
+    'wrong transfer' claim (the recipient is clearly established).
+    """
+    if not matched or not matched.counterparty:
+        return False
+    cp = matched.counterparty
+    others = [
+        e for e in (req.transaction_history or [])
+        if e is not matched and e.counterparty == cp
+        and e.status == "completed" and e.type in {"transfer", "payment"}
+    ]
+    return len(others) >= 2
 
 
 # --------------------------------------------------------------------------- #
@@ -253,32 +288,29 @@ def determine_verdict(
     req: TicketRequest,
 ) -> EvidenceVerdict:
     history = req.transaction_history or []
-
-    if not history:
-        return EvidenceVerdict.insufficient_data
-    if matched is None:
-        # History exists but nothing matches the complaint -> can't determine.
+    if not history or matched is None:
         return EvidenceVerdict.insufficient_data
 
     status = matched.status
 
-    # Amount mismatch is a strong contradiction signal.
     if amounts and matched.amount is not None and not any(
         _amounts_match(matched.amount, a) for a in amounts
     ):
         return EvidenceVerdict.inconsistent
 
+    if case_type == CaseType.wrong_transfer:
+        if _established_recipient(req, matched):
+            return EvidenceVerdict.inconsistent  # repeat recipient contradicts claim
+        if status == "completed":
+            return EvidenceVerdict.consistent
+        if status in {"failed", "reversed"}:
+            return EvidenceVerdict.inconsistent
+        return EvidenceVerdict.insufficient_data
+
     if case_type == CaseType.payment_failed:
         if status in {"failed", "reversed"}:
             return EvidenceVerdict.consistent
         if status == "completed":
-            return EvidenceVerdict.inconsistent
-        return EvidenceVerdict.insufficient_data  # pending / unknown
-
-    if case_type == CaseType.wrong_transfer:
-        if status == "completed":
-            return EvidenceVerdict.consistent  # money did leave the account
-        if status in {"failed", "reversed"}:
             return EvidenceVerdict.inconsistent
         return EvidenceVerdict.insufficient_data
 
@@ -300,36 +332,32 @@ def determine_verdict(
         return EvidenceVerdict.insufficient_data
 
     if case_type == CaseType.refund_request:
-        # A matching transaction gives the refund request a basis.
         return EvidenceVerdict.consistent
 
-    # phishing / other: a matched transaction is weak signal either way.
     return EvidenceVerdict.insufficient_data
 
 
 def determine_severity(
-    case_type: CaseType, amounts: list[float], matched: Optional[TransactionEntry]
+    case_type: CaseType,
+    verdict: EvidenceVerdict,
+    amounts: list[float],
+    matched: Optional[TransactionEntry],
 ) -> Severity:
-    amount = _peak_amount(amounts, matched)
-
     if case_type == CaseType.phishing_or_social_engineering:
-        return Severity.critical if (amount and amount >= HIGH_VALUE) else Severity.high
+        return Severity.critical
 
-    # Loss-type cases (money already moved to the wrong place / charged twice)
-    # carry a higher base than service-delay or refund-request cases.
-    if case_type in {CaseType.wrong_transfer, CaseType.duplicate_payment}:
-        base = Severity.high
-    elif case_type == CaseType.other:
-        base = Severity.low
-    else:
-        base = Severity.medium
-
-    if amount is not None:
-        if amount >= CRITICAL_VALUE:
+    amount = _peak_amount(amounts, matched)
+    loss_confirmed = case_type in LOSS_TYPES and verdict == EvidenceVerdict.consistent
+    if loss_confirmed:
+        if amount is not None and amount >= CRITICAL_VALUE:
             return Severity.critical
-        if amount >= HIGH_VALUE and base != Severity.low:
-            return Severity.high
-    return base
+        return Severity.high
+
+    if case_type == CaseType.refund_request:
+        return Severity.low
+    if case_type == CaseType.other:
+        return Severity.low
+    return Severity.medium
 
 
 def _peak_amount(amounts: list[float], matched: Optional[TransactionEntry]) -> Optional[float]:
@@ -342,34 +370,21 @@ def _peak_amount(amounts: list[float], matched: Optional[TransactionEntry]) -> O
 def route_department(
     case_type: CaseType, verdict: EvidenceVerdict, severity: Severity
 ) -> Department:
-    dept = DEPARTMENT_MAP[case_type]
-    # Contested / non-trivial refunds escalate to dispute resolution.
     if case_type == CaseType.refund_request and (
-        verdict != EvidenceVerdict.consistent or severity in {Severity.high, Severity.critical}
+        verdict == EvidenceVerdict.inconsistent or severity in {Severity.high, Severity.critical}
     ):
         return Department.dispute_resolution
-    return dept
+    return DEPARTMENT_MAP[case_type]
 
 
 def needs_human_review(
-    case_type: CaseType,
-    verdict: EvidenceVerdict,
-    severity: Severity,
-    amounts: list[float],
-    matched: Optional[TransactionEntry],
+    case_type: CaseType, verdict: EvidenceVerdict, matched: Optional[TransactionEntry]
 ) -> bool:
-    if case_type in {
-        CaseType.wrong_transfer,
-        CaseType.duplicate_payment,
-        CaseType.phishing_or_social_engineering,
-    }:
+    if case_type == CaseType.phishing_or_social_engineering:
         return True
-    if severity in {Severity.high, Severity.critical}:
+    if verdict == EvidenceVerdict.inconsistent:
         return True
-    if verdict != EvidenceVerdict.consistent:
-        return True
-    amount = _peak_amount(amounts, matched)
-    if amount is not None and amount >= HIGH_VALUE:
+    if case_type in REVIEW_IF_MATCHED and matched is not None:
         return True
     return False
 
@@ -414,9 +429,9 @@ def investigate(req: TicketRequest) -> Investigation:
     case_type, strength = classify_case_type(req)
     matched, _score = match_transaction(req, amounts, case_type)
     verdict = determine_verdict(case_type, matched, amounts, req)
-    severity = determine_severity(case_type, amounts, matched)
+    severity = determine_severity(case_type, verdict, amounts, matched)
     department = route_department(case_type, verdict, severity)
-    human_review = needs_human_review(case_type, verdict, severity, amounts, matched)
+    human_review = needs_human_review(case_type, verdict, matched)
     confidence = _confidence(strength, matched, verdict)
     reason_codes = _build_reason_codes(case_type, verdict, matched, severity)
 
