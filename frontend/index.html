@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>QueueStorm Investigator — Test Console</title>
+<style>
+  :root { --bg:#0f1216; --panel:#171c23; --ink:#e6edf3; --muted:#9aa7b4;
+          --accent:#4da3ff; --ok:#2ecc71; --bad:#ff5c5c; --line:#2a323c; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+         background:var(--bg); color:var(--ink); line-height:1.5; }
+  header { padding:20px 24px; border-bottom:1px solid var(--line); }
+  header h1 { margin:0; font-size:20px; }
+  header p { margin:4px 0 0; color:var(--muted); font-size:13px; }
+  .wrap { max-width:1100px; margin:0 auto; padding:24px; display:grid; gap:20px;
+          grid-template-columns: 1fr 1fr; }
+  @media (max-width: 860px){ .wrap { grid-template-columns:1fr; } }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:18px; }
+  .panel h2 { margin:0 0 12px; font-size:15px; }
+  label { display:block; font-size:12px; color:var(--muted); margin:10px 0 4px; }
+  input, select, textarea {
+    width:100%; background:#0c1014; color:var(--ink); border:1px solid var(--line);
+    border-radius:8px; padding:9px 10px; font-size:13px; font-family:inherit; }
+  textarea { resize:vertical; font-family: ui-monospace, "Cascadia Code", Consolas, monospace; }
+  .row { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .btns { display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; }
+  button { cursor:pointer; border:0; border-radius:8px; padding:10px 14px; font-size:13px;
+           font-weight:600; background:var(--accent); color:#05101e; }
+  button.ghost { background:transparent; color:var(--muted); border:1px solid var(--line); font-weight:500; }
+  button:active { transform: translateY(1px); }
+  .result { margin-top:14px; }
+  .badge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; font-weight:600; }
+  .badge.ok { background:rgba(46,204,113,.15); color:var(--ok); }
+  .badge.bad { background:rgba(255,92,92,.15); color:var(--bad); }
+  pre { background:#0c1014; border:1px solid var(--line); border-radius:8px; padding:12px;
+        overflow:auto; font-size:12.5px; font-family: ui-monospace, Consolas, monospace; max-height:380px; }
+  .kv { display:grid; grid-template-columns:auto 1fr; gap:4px 12px; font-size:13px; margin:10px 0; }
+  .kv div:nth-child(odd){ color:var(--muted); }
+  .meta { color:var(--muted); font-size:12px; margin-top:6px; }
+  .full { grid-column:1 / -1; }
+  code { color:var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>QueueStorm Investigator — Test Console</h1>
+  <p>Manually test <code>GET /health</code> and <code>POST /analyze-ticket</code>. Fields are pre-filled and editable. · TEAM EMB3R</p>
+</header>
+
+<div class="wrap">
+  <!-- Base URL + Health -->
+  <div class="panel">
+    <h2>Service</h2>
+    <label>Base URL</label>
+    <input id="baseUrl" value="https://teamemb3rpreli-production.up.railway.app" />
+    <div class="btns">
+      <button onclick="checkHealth()">GET /health</button>
+    </div>
+    <div class="result" id="healthResult"></div>
+  </div>
+
+  <!-- Presets -->
+  <div class="panel">
+    <h2>Load a sample</h2>
+    <p class="meta">Fill the form with a ready-made case, then edit freely.</p>
+    <div class="btns">
+      <button class="ghost" onclick="loadPreset('wrong_en')">Wrong transfer (EN)</button>
+      <button class="ghost" onclick="loadPreset('phish_bl')">Phishing (Banglish)</button>
+      <button class="ghost" onclick="loadPreset('cashin_bn')">Cash-in (Bangla)</button>
+      <button class="ghost" onclick="loadPreset('dup_en')">Duplicate (EN)</button>
+      <button class="ghost" onclick="loadPreset('empty')">Empty history</button>
+    </div>
+  </div>
+
+  <!-- Analyze form -->
+  <div class="panel full">
+    <h2>POST /analyze-ticket</h2>
+    <div class="row">
+      <div><label>ticket_id</label><input id="ticket_id" /></div>
+      <div><label>campaign_context</label><input id="campaign_context" /></div>
+    </div>
+    <label>complaint</label>
+    <textarea id="complaint" rows="3"></textarea>
+    <div class="row">
+      <div>
+        <label>language</label>
+        <select id="language"><option value="">(none)</option><option>en</option><option>bn</option><option>mixed</option></select>
+      </div>
+      <div>
+        <label>channel</label>
+        <select id="channel"><option value="">(none)</option><option>in_app_chat</option><option>call_center</option><option>email</option><option>merchant_portal</option><option>field_agent</option></select>
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label>user_type</label>
+        <select id="user_type"><option value="">(none)</option><option>customer</option><option>merchant</option><option>agent</option><option>unknown</option></select>
+      </div>
+      <div></div>
+    </div>
+    <label>transaction_history (JSON array)</label>
+    <textarea id="transaction_history" rows="8"></textarea>
+    <div class="btns">
+      <button onclick="analyze()">POST /analyze-ticket</button>
+      <button class="ghost" onclick="loadPreset('wrong_en')">Reset</button>
+    </div>
+    <div class="result" id="analyzeResult"></div>
+  </div>
+</div>
+
+<script>
+const PRESETS = {
+  wrong_en: {
+    ticket_id:"TKT-001", language:"en", channel:"in_app_chat", user_type:"customer",
+    campaign_context:"boishakh_bonanza_day_1",
+    complaint:"I sent 5000 taka to a wrong number around 2pm today. The person isn't responding. Please help me get it back.",
+    transaction_history:[{transaction_id:"TXN-9101",timestamp:"2026-04-14T14:08:22Z",type:"transfer",amount:5000,counterparty:"+8801719876543",status:"completed"}]
+  },
+  phish_bl: {
+    ticket_id:"TKT-005", language:"mixed", channel:"call_center", user_type:"customer", campaign_context:"",
+    complaint:"akta number theke call dilo, bollo ami lottery jitsi, ekhon naki OTP code ta dite hobe noile account block hoye jabe. eta ki thik?",
+    transaction_history:[]
+  },
+  cashin_bn: {
+    ticket_id:"TKT-007", language:"bn", channel:"call_center", user_type:"customer", campaign_context:"",
+    complaint:"আমি আজ সকালে এজেন্টের কাছে ৩০০০ টাকা ক্যাশ ইন করেছি কিন্তু আমার ব্যালেন্সে টাকা আসেনি। দয়া করে দেখুন।",
+    transaction_history:[{transaction_id:"TXN-9701",timestamp:"2026-04-14T09:30:00Z",type:"cash_in",amount:3000,counterparty:"AGENT-318",status:"pending"}]
+  },
+  dup_en: {
+    ticket_id:"TKT-010", language:"en", channel:"in_app_chat", user_type:"customer", campaign_context:"",
+    complaint:"I paid my electricity bill 850 taka but it deducted twice. I only paid once.",
+    transaction_history:[
+      {transaction_id:"TXN-10001",timestamp:"2026-04-14T08:15:30Z",type:"payment",amount:850,counterparty:"BILLER-DESCO",status:"completed"},
+      {transaction_id:"TXN-10002",timestamp:"2026-04-14T08:15:42Z",type:"payment",amount:850,counterparty:"BILLER-DESCO",status:"completed"}
+    ]
+  },
+  empty: {
+    ticket_id:"TKT-EMPTY", language:"en", channel:"in_app_chat", user_type:"customer", campaign_context:"",
+    complaint:"Someone is asking me to share my PIN over the phone, is that ok?",
+    transaction_history:[]
+  }
+};
+
+function loadPreset(key){
+  const p = PRESETS[key];
+  ticket_id.value = p.ticket_id;
+  complaint.value = p.complaint;
+  language.value = p.language;
+  channel.value = p.channel;
+  user_type.value = p.user_type;
+  campaign_context.value = p.campaign_context;
+  transaction_history.value = JSON.stringify(p.transaction_history, null, 2);
+}
+
+function base(){ return document.getElementById('baseUrl').value.replace(/\/+$/,''); }
+
+async function checkHealth(){
+  const box = document.getElementById('healthResult');
+  box.innerHTML = 'Checking…';
+  const t0 = performance.now();
+  try {
+    const r = await fetch(base() + '/health');
+    const ms = Math.round(performance.now()-t0);
+    const body = await r.text();
+    const ok = r.ok;
+    box.innerHTML = `<span class="badge ${ok?'ok':'bad'}">HTTP ${r.status}</span>
+      <span class="meta"> ${ms} ms</span><pre>${escapeHtml(body)}</pre>`;
+  } catch(e){
+    box.innerHTML = `<span class="badge bad">NETWORK ERROR</span><pre>${escapeHtml(e.message)}\n\nIf this is a CORS error, confirm the API allows your origin.</pre>`;
+  }
+}
+
+async function analyze(){
+  const box = document.getElementById('analyzeResult');
+  // Build the request body from the fields.
+  let history;
+  try { history = JSON.parse(transaction_history.value || '[]'); }
+  catch(e){ box.innerHTML = `<span class="badge bad">INVALID JSON</span><pre>transaction_history is not valid JSON:\n${escapeHtml(e.message)}</pre>`; return; }
+
+  const payload = { ticket_id: ticket_id.value, complaint: complaint.value, transaction_history: history };
+  if (language.value) payload.language = language.value;
+  if (channel.value) payload.channel = channel.value;
+  if (user_type.value) payload.user_type = user_type.value;
+  if (campaign_context.value) payload.campaign_context = campaign_context.value;
+
+  box.innerHTML = 'Analyzing…';
+  const t0 = performance.now();
+  try {
+    const r = await fetch(base() + '/analyze-ticket', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
+    });
+    const ms = Math.round(performance.now()-t0);
+    const data = await r.json();
+    let summary = '';
+    if (r.ok) {
+      const f = k => data[k] ?? '—';
+      summary = `<div class="kv">
+        <div>case_type</div><div><b>${f('case_type')}</b></div>
+        <div>evidence_verdict</div><div>${f('evidence_verdict')}</div>
+        <div>relevant_transaction_id</div><div>${f('relevant_transaction_id')}</div>
+        <div>department</div><div>${f('department')} · severity ${f('severity')}</div>
+        <div>human_review_required</div><div>${f('human_review_required')} · confidence ${f('confidence')}</div>
+      </div>`;
+    }
+    box.innerHTML = `<span class="badge ${r.ok?'ok':'bad'}">HTTP ${r.status}</span>
+      <span class="meta"> ${ms} ms</span>${summary}
+      <pre>${escapeHtml(JSON.stringify(data, null, 2))}</pre>`;
+  } catch(e){
+    box.innerHTML = `<span class="badge bad">NETWORK ERROR</span><pre>${escapeHtml(e.message)}\n\nIf this is a CORS error, confirm the API allows your origin.</pre>`;
+  }
+}
+
+function escapeHtml(s){ return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+// Pre-fill on load.
+loadPreset('wrong_en');
+</script>
+</body>
+</html>

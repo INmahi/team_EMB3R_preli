@@ -1,17 +1,25 @@
-"""Optional LLM analysis layer (OFF by default, pluggable, OpenAI-compatible).
+"""LLM analysis layer — multi-provider, load-balanced, with deterministic fallback.
 
-When enabled (LLM_ENABLED=true + a key), the LLM performs the FULL analysis —
-classification, evidence reasoning, and drafting — constrained to the exact enums.
-The deterministic engine still runs first and is passed in as a baseline hint, and
-remains the fallback whenever the LLM is unavailable, slow, rate-limited, or returns
+When enabled (LLM_ENABLED=true + >=1 provider in LLM_PROVIDERS), the LLM performs the
+FULL analysis — classification, evidence reasoning, and drafting — constrained to the
+exact enums. The deterministic engine is passed in as a baseline hint and remains the
+fallback whenever every provider is unavailable, slow, rate-limited, or returns
 anything that doesn't validate. Safety is always enforced by the caller afterwards.
 
+Load balancing
+--------------
+Requests are spread across providers **round-robin**. If a provider returns 429 / 5xx
+(or times out), it is put on a short **cooldown** and the request **fails over** to the
+next provider. This keeps any single free-tier key from being rate-limited under load.
+
 Provider-agnostic: any OpenAI-compatible chat-completions endpoint works (Groq,
-Google Gemini OpenAI-compat, OpenRouter, OpenAI, ...), selected purely by env.
+Cerebras, Google Gemini OpenAI-compat, OpenRouter, OpenAI, ...).
 """
 from __future__ import annotations
 
 import json
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from typing import Optional
 
@@ -106,9 +114,43 @@ def _validate(data: dict, req: TicketRequest) -> Optional[dict]:
     return data
 
 
-def _call(req: TicketRequest, baseline: Investigation) -> dict:
+# --------------------------------------------------------------------------- #
+# Provider pool: round-robin + cooldown + failover                            #
+# --------------------------------------------------------------------------- #
+class RateLimited(Exception):
+    """Raised when a provider returns 429 / 5xx (retriable -> try next provider)."""
+
+
+_lock = threading.Lock()
+_counter = 0
+_cooldown_until: dict[str, float] = {}   # provider name -> epoch when usable again
+
+
+def _ordered_providers() -> list[dict]:
+    """Round-robin order, preferring providers not currently in cooldown."""
+    global _counter
+    provs = settings.PROVIDERS
+    n = len(provs)
+    if n == 0:
+        return []
+    with _lock:
+        start = _counter % n
+        _counter += 1
+    rotated = [provs[(start + i) % n] for i in range(n)]
+    now = time.time()
+    fresh = [p for p in rotated if _cooldown_until.get(p["name"], 0.0) <= now]
+    return fresh or rotated  # if all cooling down, still try (last resort)
+
+
+def _mark_cooldown(name: str) -> None:
+    with _lock:
+        _cooldown_until[name] = time.time() + settings.PROVIDER_COOLDOWN
+
+
+def _call_provider(provider: dict, req: TicketRequest, baseline: Investigation) -> dict:
+    """One HTTP call to a provider. Raises RateLimited on 429/5xx."""
     payload = {
-        "model": settings.LLM_MODEL,
+        "model": provider["model"],
         "temperature": 0.2,
         "messages": [
             {"role": "system", "content": _SYSTEM_PROMPT},
@@ -117,35 +159,45 @@ def _call(req: TicketRequest, baseline: Investigation) -> dict:
         "response_format": {"type": "json_object"},
     }
     headers = {
-        "Authorization": f"Bearer {settings.LLM_API_KEY}",
+        "Authorization": f"Bearer {provider['api_key']}",
         "Content-Type": "application/json",
     }
-    url = settings.LLM_BASE_URL.rstrip("/") + "/chat/completions"
-    with httpx.Client(timeout=settings.LLM_TIMEOUT) as client:
+    url = provider["base_url"].rstrip("/") + "/chat/completions"
+    with httpx.Client(timeout=provider["timeout"]) as client:
         resp = client.post(url, json=payload, headers=headers)
+        if resp.status_code == 429 or resp.status_code >= 500:
+            raise RateLimited(f"{provider['name']} -> {resp.status_code}")
         resp.raise_for_status()
         content = resp.json()["choices"][0]["message"]["content"]
         return json.loads(content)
 
 
 def analyze(req: TicketRequest, baseline: Investigation) -> Optional[dict]:
-    """Run full LLM analysis. Return a validated field dict, or None to fall back.
+    """Run LLM analysis across providers (round-robin + failover).
 
-    A hard wall-clock deadline guarantees we abandon a slow/misbehaving provider
-    well under the 30s per-request limit (some endpoints retry server-side and
-    ignore the HTTP client timeout). The abandoned worker thread is left to die on
-    its own; we return immediately and fall back to the deterministic result.
+    Returns a validated field dict, or None to fall back to the deterministic result.
+    Each provider call is bounded by a hard wall-clock deadline so a hung endpoint can
+    never push us past the 30s per-request limit.
     """
     if not settings.llm_active():
         return None
 
-    executor = ThreadPoolExecutor(max_workers=1)
-    try:
-        future = executor.submit(_call, req, baseline)
-        data = future.result(timeout=settings.LLM_TIMEOUT)
-    except (FutureTimeout, Exception):
-        return None
-    finally:
-        executor.shutdown(wait=False)  # do not block on a hung request
+    for provider in _ordered_providers():
+        executor = ThreadPoolExecutor(max_workers=1)
+        try:
+            future = executor.submit(_call_provider, provider, req, baseline)
+            data = future.result(timeout=provider["timeout"])
+        except RateLimited:
+            _mark_cooldown(provider["name"])
+            continue                      # rate-limited/overloaded -> next provider
+        except (FutureTimeout, Exception):
+            _mark_cooldown(provider["name"])
+            continue                      # timeout / network / bad JSON -> next provider
+        finally:
+            executor.shutdown(wait=False)
 
-    return _validate(data, req)
+        valid = _validate(data, req)
+        if valid:
+            return valid
+        # Valid HTTP but unusable content: try the next provider too.
+    return None

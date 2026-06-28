@@ -268,14 +268,28 @@ Full deployment + judging steps: see [RUNBOOK.md](RUNBOOK.md).
 | Variable | Default | Purpose |
 |---|---|---|
 | `PORT` | `8000` | Bind port (Railway injects this). |
-| `LLM_ENABLED` | `false` | Turn the optional LLM analysis on. |
-| `LLM_BASE_URL` | Groq | Any OpenAI-compatible base URL. |
-| `LLM_MODEL` | `llama-3.3-70b-versatile` | Model name. |
-| `LLM_API_KEY` | *(empty)* | Provider key — set on the platform, **never** in the repo. |
-| `LLM_TIMEOUT` | `8` | Seconds before abandoning the LLM and using the deterministic result. |
+| `LLM_ENABLED` | `false` | Turn the LLM analysis on. |
+| `LLM_PROVIDERS` | *(empty)* | **Recommended.** JSON array of OpenAI-compatible providers — the service load-balances (round-robin) and fails over across them. |
+| `LLM_PROVIDER_COOLDOWN` | `30` | Seconds a provider is skipped after a 429/overload. |
+| `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` / `LLM_TIMEOUT` | Groq / llama-3.3-70b / — / 8 | Legacy single-provider config, used only if `LLM_PROVIDERS` is unset. |
 
-The LLM activates only when `LLM_ENABLED=true` **and** a key is present; otherwise it's rules-only.
+The LLM activates only when `LLM_ENABLED=true` **and** ≥1 provider is configured; otherwise rules-only.
+
+**Multi-provider load balancing:** set `LLM_PROVIDERS` to spread requests across several free
+keys/providers so none gets rate-limited. Each request picks the next provider round-robin; a
+`429`/`5xx`/timeout puts that provider on a short cooldown and **fails over** to the next; if all
+fail, the request falls back to the deterministic engine. Example (one line):
+```json
+[{"name":"groq","base_url":"https://api.groq.com/openai/v1","model":"openai/gpt-oss-120b","api_key":"...","timeout":12},
+ {"name":"cerebras","base_url":"https://api.cerebras.ai/v1","model":"gpt-oss-120b","api_key":"...","timeout":12}]
+```
 See [`.env.example`](.env.example). **No real secrets are committed.**
+
+## Test console (frontend)
+A static page in [`frontend/index.html`](frontend/index.html) lets you call both endpoints from a
+browser with pre-filled, editable fields (and language presets: EN / Bangla / Banglish). It's
+deployed separately to Netlify (`netlify.toml` publishes `frontend/`); CORS is enabled on the API so
+the page can reach it. Just set the Base URL field to your live API.
 
 ---
 

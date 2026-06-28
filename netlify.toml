@@ -1,0 +1,5 @@
+# Netlify config for the static test console (frontend/).
+# No build step — it's a single static HTML file.
+[build]
+  publish = "frontend"
+  command = ""

@@ -10,6 +10,7 @@ import logging
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .config import settings
@@ -25,6 +26,15 @@ app = FastAPI(
     title="QueueStorm Investigator",
     description="AI/API support copilot — classifies, routes, and explains finance complaints.",
     version="1.0.0",
+)
+
+# Public, no-auth JSON API → allow any origin so the static test UI (Netlify) and
+# the judge harness can call it from the browser without CORS errors.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 

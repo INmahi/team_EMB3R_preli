@@ -124,6 +124,42 @@ def test_ambiguity_guardrail_vetoes_llm_guess(monkeypatch):
     assert body["case_type"] == "wrong_transfer"             # LLM classification kept
 
 
+def test_failover_skips_rate_limited_provider(monkeypatch):
+    from app import llm
+    from app.config import settings
+    from app.reasoning import investigate
+
+    monkeypatch.setattr(settings, "LLM_ENABLED", True)
+    monkeypatch.setattr(settings, "PROVIDERS", [
+        {"name": "p1", "base_url": "x", "model": "m", "api_key": "k", "timeout": 5},
+        {"name": "p2", "base_url": "y", "model": "m", "api_key": "k", "timeout": 5},
+    ])
+    monkeypatch.setattr(llm, "_counter", 0)         # deterministic start at p1
+    llm._cooldown_until.clear()
+
+    good = {
+        "relevant_transaction_id": None, "evidence_verdict": "insufficient_data",
+        "case_type": "other", "severity": "low", "department": "customer_support",
+        "agent_summary": "s", "recommended_next_action": "a", "customer_reply": "r",
+        "human_review_required": False, "confidence": 0.5, "reason_codes": [],
+    }
+    calls = []
+
+    def fake_call(provider, req, baseline):
+        calls.append(provider["name"])
+        if provider["name"] == "p1":
+            raise llm.RateLimited("429")
+        return good
+
+    monkeypatch.setattr(llm, "_call_provider", fake_call)
+
+    req = _req()
+    out = llm.analyze(req, investigate(req))
+    assert out == good                 # second provider answered
+    assert calls == ["p1", "p2"]       # tried p1, failed over to p2
+    assert "p1" in llm._cooldown_until  # p1 put on cooldown
+
+
 def test_validate_accepts_null_transaction_id():
     req = _req()
     good = {
