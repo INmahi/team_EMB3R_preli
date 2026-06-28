@@ -16,6 +16,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
+from .guards import looks_like_injection
 from .keywords import AMOUNT_HINTS, CASE_KEYWORDS, STATUS_WORDS
 from .schemas import (
     CaseType,
@@ -425,10 +426,21 @@ def _build_reason_codes(
 # --------------------------------------------------------------------------- #
 # Entry point                                                                  #
 # --------------------------------------------------------------------------- #
+def _injection_attempt(req: TicketRequest) -> bool:
+    """Detect manipulation attempts in the complaint, metadata, or transaction fields."""
+    parts = [req.complaint or "", str(req.metadata or "")]
+    parts += [str(e.counterparty or "") for e in (req.transaction_history or [])]
+    return looks_like_injection(" ".join(parts))
+
+
 def investigate(req: TicketRequest) -> Investigation:
     amounts = extract_amounts(req.complaint)
 
     case_type, strength = classify_case_type(req)
+    # A prompt-injection / manipulation attempt is treated as a fraud/security event.
+    if _injection_attempt(req):
+        case_type = CaseType.phishing_or_social_engineering
+        strength = max(strength, 2)
     matched, _score, ambiguous = match_transaction(req, amounts, case_type)
     verdict = determine_verdict(case_type, matched, amounts, req)
     severity = determine_severity(case_type, verdict, amounts, matched)

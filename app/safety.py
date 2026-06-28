@@ -52,17 +52,49 @@ _SAFE_REFUND_PHRASE = (
     "any eligible amount will be returned through official channels after review"
 )
 
-# Redirects to non-official third parties.
+# Redirects to non-official third parties — incl. shorteners and bare risky domains
+# (matches the red-team URL set: http(s), www, bit.ly/tinyurl/t.me/wa.me, *.xyz/.top/...).
 _THIRD_PARTY = re.compile(
-    r"\b(whatsapp|telegram|imo|messenger)\b"
-    r"|\bcall\s+this\s+number\b|\bcontact\s+this\s+(number|person|agent)\b"
-    r"|https?://\S+",
+    r"https?://\S+"
+    r"|www\.\S+"
+    r"|\b(?:bit\.ly|tinyurl|t\.me|wa\.me)\S*"
+    r"|\b[a-z0-9\-]+\.(?:xyz|info|top|click|link|ru|tk|ml|ga|cf|biz|online|site)\b\S*"
+    r"|\b(whatsapp|telegram|imo|messenger)\b"
+    r"|\bcall\s+this\s+number\b|\bcontact\s+this\s+(number|person|agent)\b",
     re.IGNORECASE,
 )
 _SAFE_CHANNEL_PHRASE = (
-    "please reach out only through bKash official support channels (the official app, "
+    "please reach out only through official support channels (the official app, "
     "verified hotline, or official website)"
 )
+
+# Echo of an injected instruction / system-prompt leak — such a sentence is dropped.
+_INSTRUCTION_ECHO = re.compile(
+    r"ignore\s+(all\s+)?previous|ignore\s+prior|disregard\s+(your|all|previous)"
+    r"|new\s+instructions?\s*:|###\s*new\s+instructions|system\s+prompt"
+    r"|developer\s+mode|the\s+allowed\s+enums|as\s+an\s+ai\s+language"
+    r"|you\s+are\s+(now\s+)?an?\s+(ai|assistant|investigat|unrestricted)"
+    r"|i\s+was\s+instructed|i\s+will\s+share\s+your\s+pin",
+    re.IGNORECASE,
+)
+# Echo of a specific (often injected) amount: "refund of 12000", "reversal of ৳50000".
+_AMOUNT_ECHO = re.compile(
+    r"\b(refund|reversal|reversed|return|returned)\b\s+of\s+(?:[৳$]|tk\.?|bdt)?\s*[\d][\d,]*",
+    re.IGNORECASE,
+)
+
+# A single canonical credential warning. Any sentence that mentions a credential is
+# replaced with this, guaranteeing the negation sits adjacent to the credential words
+# (so it can never read as a solicitation).
+_CANONICAL_CRED_WARNING = (
+    "For your security, never disclose your PIN, OTP, password, or card details to anyone; "
+    "our team will never ask for them."
+)
+
+
+def _contains_credential(sentence: str) -> bool:
+    s = sentence.lower()
+    return any(tok in s for tok in _CRED_TOKENS)
 
 
 def _is_credential_request(sentence: str) -> bool:
@@ -78,29 +110,45 @@ def _is_credential_request(sentence: str) -> bool:
 
 
 def sanitize_text(text: str) -> str:
-    """Scrub a free-text field of safety violations. Idempotent and crash-free."""
+    """Scrub a free-text field of safety violations. Idempotent and crash-free.
+
+    Applied to EVERY outgoing text field (reply, summary, next-action), so safety
+    holds regardless of what the LLM produced.
+    """
     if not text:
         return text
 
     sentences = _SENTENCE_SPLIT.split(text)
     kept: list[str] = []
+    cred_added = False
     for sent in sentences:
         s = sent.strip()
         if not s:
             continue
-        # Drop sentences that ask the customer for secret credentials.
-        if _is_credential_request(s):
+        # Drop sentences that echo an injected instruction or leak the prompt.
+        if _INSTRUCTION_ECHO.search(s):
             continue
+        # Any credential mention -> replace whole sentence with the canonical warning
+        # (once). This removes solicitations and guarantees negation adjacency.
+        if _contains_credential(s):
+            if not cred_added:
+                kept.append(_CANONICAL_CRED_WARNING)
+                cred_added = True
+            continue
+        # Remove echoed specific amounts ("refund of 12000" -> "refund").
+        s = _AMOUNT_ECHO.sub(lambda m: m.group(1), s)
         # Soften definitive refund/reversal promises.
         s = _REFUND_CONFIRM.sub(_SAFE_REFUND_PHRASE, s)
         # Replace third-party / link redirects with official-channel guidance.
         if _THIRD_PARTY.search(s):
             s = _THIRD_PARTY.sub("", s).strip()
             s = (s + " " if s else "") + _SAFE_CHANNEL_PHRASE
-        kept.append(s)
+        if s:
+            kept.append(s)
 
     out = " ".join(kept).strip()
-    out = re.sub(r"\s{2,}", " ", out)
+    out = re.sub(r"\(\s*\)", "", out)          # drop empty parens left by scrubbing
+    out = re.sub(r"\s{2,}", " ", out).strip()
     return out or _SAFE_CHANNEL_PHRASE
 
 
@@ -114,6 +162,10 @@ def is_safe(text: str) -> bool:
     if _REFUND_CONFIRM.search(text):
         return False
     if _THIRD_PARTY.search(text):
+        return False
+    if _INSTRUCTION_ECHO.search(text):
+        return False
+    if _AMOUNT_ECHO.search(text):
         return False
     return True
 
