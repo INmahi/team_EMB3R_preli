@@ -161,8 +161,14 @@ allowed enums (and a deterministic baseline as grounding) and returns its **own*
 `human_review_required` — plus the `agent_summary`, `recommended_next_action`, and `customer_reply`.
 **The LLM's decisions are what the service returns.** This is what gives the system real
 language understanding: it generalizes to novel phrasings and to Bangla/Banglish that fixed rules
-would miss, and it writes natural, context-aware replies. Default model: **Groq
-`llama-3.3-70b-versatile`** (≈1.4s/call). See [MODELS](#models); the provider is swappable by env.
+would miss, and it writes natural, context-aware replies. **Two LLMs are load-balanced**
+round-robin across separate free providers — **Groq `llama-3.3-70b-versatile`** and **Cerebras
+`gpt-oss-120b`** (≈1.3–1.5s/call) — with automatic failover between them. See [MODELS](#models);
+providers are swappable by env.
+
+**Reply language (strict):** English complaints get an English `customer_reply`; Bangla, Banglish
+(romanized), or mixed complaints get a **pure Bangla** reply (Bengali script) — never Banglish,
+never English. Agent-facing fields stay in English.
 
 ### Deterministic engine (reliability & safety layer)
 Running an LLM as the decision-maker introduces three risks under a judge harness — it can be
@@ -187,20 +193,29 @@ generalization while recovering the one case it would have gotten wrong, with ze
 
 ## MODELS
 
+The deployed system runs **two LLMs, load-balanced** (round-robin), each on a separate free
+provider so their rate limits are independent — plus the deterministic engine as the safety net.
+
 | Model | Role | Where it runs | Why chosen |
 |---|---|---|---|
-| **Groq — `llama-3.3-70b-versatile`** | **Primary** — full analysis | Groq cloud (OpenAI-compatible) | ≈320 tok/s keeps p95 ≤ 5s; free tier (30 req/min, 1,000/day); strong reasoning + multilingual. Default model. |
-| **Google `gemini-2.0-flash`** | Alternative LLM | Google AI (OpenAI-compat endpoint) | Free 1,500 req/day; very strong Bangla/Banglish. |
-| **OpenRouter `:free` models** | Alternative LLM | OpenRouter | One key, many free models. |
-| **Deterministic rules engine** | Fallback / safety layer | In-process Python | Sub-millisecond, free, reproducible; guarantees a valid, safe answer whenever the LLM is unavailable or invalid. |
+| **`llama-3.3-70b-versatile`** | LLM #1 — full analysis | **Groq** (OpenAI-compatible) | ≈320 tok/s, ~1.3s/call; free tier (30 req/min, 1,000/day); strong reasoning. |
+| **`gpt-oss-120b`** | LLM #2 — full analysis | **Cerebras** (OpenAI-compatible) | Larger 120B open model; very fast on Cerebras; better at code-mixed **Banglish**. |
+| **Deterministic rules engine** | Fallback / safety layer | In-process Python | Sub-millisecond, free, reproducible; guarantees a valid, safe answer whenever both LLMs are unavailable or invalid. |
 
-The LLM is **pluggable via environment variables only** — switch providers with no code change.
+**How requests are distributed:** each request is sent to the **next provider in rotation**
+(request 1 → Groq, request 2 → Cerebras, request 3 → Groq, …). If a provider returns `429`/`5xx`
+or times out, it is put on a short cooldown and the request **fails over** to the other provider;
+if both fail, it falls back to the deterministic engine. This spreads load across two independent
+free accounts (≈2× effective rate limit) with automatic failover.
+
+Both LLMs are **pluggable via environment variables only** (`LLM_PROVIDERS`) — add, remove, or swap
+a provider/model (e.g. add Google `gemini-2.0-flash` for even stronger Bangla) with no code change.
 
 ## Cost reasoning
-Running cost is effectively **$0**: the primary LLM uses a **free-tier** provider (one short request
-per ticket), and if free limits or latency are ever hit, the service falls back to the **free**
-deterministic engine. **No GPU, no paid APIs, no model weights to host** — keeping the image small
-and the per-request cost negligible.
+Running cost is effectively **$0**: both LLMs use **free-tier** providers (one short request per
+ticket, spread across two accounts so neither is exhausted), and if free limits or latency are ever
+hit, the service falls back to the **free** deterministic engine. **No GPU, no paid APIs, no model
+weights to host** — keeping the image small and the per-request cost negligible.
 
 ---
 
